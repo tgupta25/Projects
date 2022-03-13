@@ -1,0 +1,553 @@
+---
+title: "A8"
+author: "Tushar Gupta"
+date: "1 November 2021"
+output: pdf_document
+---
+
+```{r setup, tidy=TRUE, tidy.opts= list(width.cutoff=60), include=FALSE}
+    knitr::opts_chunk$set(echo = TRUE,
+    message = FALSE,
+    warning = FALSE)
+
+```
+
+#Installing relevant libraries.
+
+```{r}
+
+# install.packages("data.table")
+# install.packages("tidyquant")
+# install.packages("tidyverse")
+# install.packages("ggplot2")
+# install.packages("dplyr")
+# install.packages("collapse")
+# install.packages("broom")
+# install.packages("quantmod")
+# install.packages("rugarch")
+# install.packages("formatR")
+
+library("data.table")
+library("tidyquant")
+library("tidyverse")
+library("ggplot2")
+library("dplyr")
+library("collapse")
+library("broom")
+library("quantmod")
+library("rugarch")
+library("formatR")
+library("readxl")
+
+```
+
+#Random Sampling of year range for data processing.
+
+```{r}
+
+#Random number seed - GTID.
+set.seed(903534819)
+
+#Starting year for the project.
+starting_year <- sample(1980:2010,1)
+
+```
+
+#Seed : 903534819.
+#Random number (Starting year) : 1993.
+
+#Loading daily CRSP data.
+
+```{r}
+
+dsf_sample <- fread("T:\\Study\\MFin\\Assignment 5\\dsf_new.csv", nrows=5000000)
+
+dsf_sample <- dsf_sample[order(dsf_sample$DATE),] %>% 
+              filter(SHRCD==10|SHRCD==11) %>% #filtering in only common stocks.
+              relocate(DATE,PERMNO,CUSIP,everything()) %>%
+              mutate(across(.cols = c(3:ncol(dsf_sample)), .fns = as.double),
+                     DATE = ymd(DATE),
+                     Abs_PRC=abs(c(PRC)),
+                     date_mon=as.yearmon(DATE),
+                     date_year=YEAR(DATE))
+  
+dsf_sample[is.na(dsf_sample)] <- 0
+
+```
+
+#Randomly selecting 250 firms (PERMNO).
+
+```{r}
+
+#Random sampling of 250 firms from the DSF dataset.
+firms_list <- sample(unique((dsf_sample[dsf_sample$date_year=="1993",PERMNO])), 250, replace=FALSE)
+
+#Preparing 250 firms data subset to work on. 
+dsf_subset <- dsf_sample %>% 
+               filter(date_year %in% 1993:2002,
+                      PERMNO %in% firms_list)
+
+```
+
+#Downloading factor data from the Ken-French library.
+
+```{r}
+
+#Downloading 3 factors file.
+url <- "http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip"
+destfile <- "F-F_Research_Data_Factors_daily_CSV.zip"
+curl::curl_download(url = url,destfile=destfile)
+unzip(destfile)
+
+factor_data <- fread("F-F_Research_Data_Factors_daily.CSV",skip = 4)
+factor_data <- factor_data %>% 
+               rename(DATE = V1)
+
+factor_data$DATE <- ymd(factor_data$DATE)
+
+```
+
+#Computing excess daily returns.
+
+```{r}
+
+dsf_subset <- left_join(dsf_subset, factor_data[,c("DATE","RF")], by="DATE")
+
+dsf_subset <- dsf_subset[order(dsf_subset$PERMNO, dsf_subset$DATE),]
+
+dsf_subset <- dsf_subset %>% 
+              mutate(ExcessRET = c(RET - RF/100),
+              EXCESSVWRETD =c(VWRETD - RF/100),
+              Industry = case_when( HSICCD<=999 ~ "Agriculture, Forestry and Fishing",
+                                    HSICCD>=1000 & HSICCD<=1499 ~ "Mining",
+                                    HSICCD>=1500 & HSICCD<=1799 ~ "Construction",
+                                    HSICCD>=2000 & HSICCD<=3999 ~ "Manufacturing",
+                                    HSICCD>=4000 & HSICCD<=4999 ~ "Transportation and other Utilities",
+                                    HSICCD>=5000 & HSICCD<=5199 ~ "Wholesale Trade",
+                                    HSICCD>=5200 & HSICCD<=5999 ~ "Retail Trade",
+                                    HSICCD>=6000 & HSICCD<=6799 ~ "Finance, Insurance and Real Estate",
+                                    HSICCD>=7000 & HSICCD<=8999 ~ "Services",
+                                    HSICCD>=9000 & HSICCD<=9999 ~ "Public Administration"))
+            
+dsf_subset[is.na(dsf_subset)] <- 0
+
+```
+
+#Computing 1 month lagged returns.
+
+```{r}
+
+dsf_subset <- dsf_subset %>%
+              group_by(PERMNO) %>%
+              mutate(lagged_ExcessRET_1mon = lag(ExcessRET,22),
+                     lagged_ExcessVWRETD_1mon = lag(EXCESSVWRETD,22)) %>%
+              ungroup()
+
+```
+
+#8.1: Computing demeaned excess returns.
+
+```{r}
+
+dsf_subset_mean_RET <- dsf_subset %>%
+                       group_by(PERMNO, date_mon) %>%
+                       summarise(Lagged_Mean_ExcessRET = fmean(lagged_ExcessRET_1mon),
+                                 Lagged_Mean_ExcessVWRETD = fmean(lagged_ExcessVWRETD_1mon))
+              
+#Joining main dataset with monthly mean returns for all in-scope firms.
+dsf_subset <- left_join(dsf_subset, dsf_subset_mean_RET, by=c("PERMNO","date_mon"))
+remove(dsf_subset_mean_RET)
+
+#Computing new variables (demeaned excess returns) for beta calculations.
+dsf_subset <- dsf_subset %>%
+              mutate(Lagged_demeaned_ExcessRET = c(lagged_ExcessRET_1mon - Lagged_Mean_ExcessRET),
+                     Lagged_demeaned_ExcessVWRETD = c(lagged_ExcessVWRETD_1mon - Lagged_Mean_ExcessVWRETD),
+                     Lagged_demeaned_ExcessRET_Max = pmax(Lagged_demeaned_ExcessRET,0),
+                     Lagged_demeaned_ExcessRET_Min = pmin(Lagged_demeaned_ExcessRET,0),
+                     Lagged_demeaned_ExcessVWRETD_Max = pmax(Lagged_demeaned_ExcessVWRETD,0),
+                     Lagged_demeaned_ExcessVWRETD_Min = pmin(Lagged_demeaned_ExcessVWRETD,0))
+
+```
+
+#Beta Computation.
+
+```{r}
+
+Beta_comp_func <- function(data, col1, col2, col3){
+  
+  col1 <- enquo(col1)
+  col2 <- enquo(col2)
+  col3 <- enquo(col3)
+    
+  semibeta <- data %>%
+              group_by(PERMNO, date_mon) %>%
+              summarise(Beta_estimate = sum((!!col1) * (!!col2))/sum((!!col3)**2))
+  
+  semibeta <- semibeta %>%
+              drop_na()
+  
+  return(semibeta)
+}
+
+```
+
+#Creating master data set for all betas.
+
+```{r}
+
+Semibeta1 <- Beta_comp_func(data = dsf_subset,
+                            col1 = Lagged_demeaned_ExcessRET_Min, 
+                            col2 = Lagged_demeaned_ExcessVWRETD_Min, 
+                            col3 = Lagged_demeaned_ExcessVWRETD) %>%
+             rename(SemiBeta_estimate1 = Beta_estimate)
+
+Semibeta2 <- Beta_comp_func(data = dsf_subset,
+                            col1 = Lagged_demeaned_ExcessRET_Max, 
+                            col2 = Lagged_demeaned_ExcessVWRETD_Max, 
+                            col3 = Lagged_demeaned_ExcessVWRETD) %>%
+             rename(SemiBeta_estimate2 = Beta_estimate)
+
+Semibeta3 <- Beta_comp_func(data = dsf_subset,
+                            col1 = Lagged_demeaned_ExcessRET_Max, 
+                            col2 = Lagged_demeaned_ExcessVWRETD_Min, 
+                            col3 = Lagged_demeaned_ExcessVWRETD) %>%
+             rename(SemiBeta_estimate3 = Beta_estimate)
+
+Semibeta4 <- Beta_comp_func(data = dsf_subset,
+                            col1 = Lagged_demeaned_ExcessRET_Min, 
+                            col2 = Lagged_demeaned_ExcessVWRETD_Max, 
+                            col3 = Lagged_demeaned_ExcessVWRETD) %>%
+             rename(SemiBeta_estimate4 = Beta_estimate)
+
+Beta <- Beta_comp_func(data = dsf_subset,
+                       col1 = Lagged_demeaned_ExcessRET, 
+                       col2 = Lagged_demeaned_ExcessVWRETD, 
+                       col3 = Lagged_demeaned_ExcessVWRETD)
+
+DownBeta <- Beta_comp_func(data = dsf_subset,
+                         col1 = Lagged_demeaned_ExcessRET,
+                         col2 = Lagged_demeaned_ExcessVWRETD_Min,
+                         col3 = Lagged_demeaned_ExcessVWRETD_Min) %>%
+          rename(DownBeta_estimate = Beta_estimate)
+
+UpBeta <- Beta_comp_func(data = dsf_subset,
+                         col1 = Lagged_demeaned_ExcessRET,
+                         col2 = Lagged_demeaned_ExcessVWRETD_Max,
+                         col3 = Lagged_demeaned_ExcessVWRETD_Max) %>%
+          rename(UpBeta_estimate = Beta_estimate)
+
+Monthly_Beta_estimates <- Reduce(function(x,y) inner_join(x, y, by=c("PERMNO","date_mon")), list(Semibeta1, Semibeta2, Semibeta3, Semibeta4, Beta, DownBeta, UpBeta))
+
+write.csv(Monthly_Beta_estimates, file = "Monthly_Beta_estimates.csv")
+
+```
+
+#Comparison of Betas.
+
+```{r}
+
+Monthly_Beta_estimates <- Monthly_Beta_estimates[order(Monthly_Beta_estimates$PERMNO,Monthly_Beta_estimates$date_mon),]
+
+Monthly_Beta_estimates <- Monthly_Beta_estimates %>%
+                    mutate(SemiBetasSum = c(SemiBeta_estimate1 + SemiBeta_estimate2 + SemiBeta_estimate3 + SemiBeta_estimate4), 
+                           BetaDiff = c(Beta_estimate - SemiBetasSum))
+
+remove(Semibeta1, Semibeta2, Semibeta3, Semibeta4, Beta, UpBeta, DownBeta)
+
+```
+
+#Computing Co-Skewness and Co-kurtosis.
+
+```{r}
+
+Moment_estimates <- dsf_subset %>%
+                    group_by(PERMNO, date_mon) %>%
+                    summarise(co_skewnewss = (sum(Lagged_demeaned_ExcessRET * Lagged_demeaned_ExcessVWRETD**2)/22)/
+                                       (sqrt(sum(Lagged_demeaned_ExcessRET**2)/22) * sum(Lagged_demeaned_ExcessVWRETD**2)/22),
+                              co_kurtosis =  (sum(Lagged_demeaned_ExcessRET * Lagged_demeaned_ExcessVWRETD**3)/22)/
+                          (sqrt(sum(Lagged_demeaned_ExcessRET**2)/22) * ((sum(Lagged_demeaned_ExcessVWRETD**2)/22)**1.5)))
+
+Moment_estimates <- Moment_estimates %>%
+                    drop_na()
+
+write.csv(Moment_estimates, file = "Moment_estimates.csv")
+
+```
+
+#8.2: Creating equal-weighted portfolio of 250 stocks.
+
+```{r}
+
+dsf_portfolio <- dsf_subset %>%
+                 group_by(DATE) %>%
+                 summarise(Portfolio_RET = (1/250)*sum(RET))
+
+hist(dsf_portfolio$Portfolio_RET,
+     main="Daily Returns Histogram",
+     xlab="Returns",
+     ylab="Frequency",
+     col="blue",
+     breaks = 150
+     )
+
+```
+
+#VaR computation function.
+
+```{r}
+
+compute_VaR_func <- function(data, InvestedAmt = 1000000){
+
+  #Output data frame.
+  output <- data.frame()
+  
+  data <- data %>%
+          mutate(Var_RET=1,
+                 Var_Value=1,
+                 ES_Value=1)
+  
+  for (i in 253:nrow(data)){
+    
+    data_filtered <- data[i-252:i,]
+    Var_estimate <- quantile(data_filtered$Portfolio_RET,probs = 0.05)[[1]]#VaR return estimation.
+    ES <- InvestedAmt - InvestedAmt*(1 + mean(data_filtered[data_filtered$Portfolio_RET < Var_estimate,"Portfolio_RET"][[1]]))
+    
+    data[i,]$Var_RET = Var_estimate
+    data[i,]$Var_Value = InvestedAmt - InvestedAmt*(1+Var_estimate)#Var dollar value estimation.
+    data[i,]$ES_Value = ES
+    
+    output <- rbind(output,data[i,])
+  
+    }
+  output <- output %>%
+            drop_na()
+  
+  return(output)
+  
+}
+
+```
+
+#Computing risk metrics for Portfolio 1.
+
+```{r}
+
+dsf_portfolio_1 <- compute_VaR_func(data = dsf_portfolio, InvestedAmt = 1000000)
+write.csv(dsf_portfolio_1, file = "Var, ES estimates 8.2.1.csv")
+
+```
+
+#Preparing the data set for 1 extra year of returns in predicting the above risk metrics.
+
+```{r}
+
+dsf_subset_2 <- dsf_sample %>%
+                filter(date_year %in% 1992:2002,
+                       PERMNO %in% firms_list)
+
+dsf_subset_2 <- dsf_subset_2[order(dsf_subset_2$PERMNO,dsf_subset_2$DATE),]
+
+#Portfolio of these securities from 1992 to 2002.
+dsf_portfolio_2 <- dsf_subset_2 %>%
+                   group_by(DATE) %>%
+                   summarise(Portfolio_RET = sum((1/250)*RET))
+
+write.csv(dsf_portfolio_2, file = "Var, ES estimates 8.2.2.csv")
+remove(dsf_subset_2)
+remove(dsf_sample)
+```
+
+#Computing VaR, Expected Shortfall using 1 extra year of historical returns.            
+
+```{r}
+
+dsf_portfolio_2 <- compute_VaR_func(data = dsf_portfolio, InvestedAmt = 1000000) 
+
+hist(dsf_portfolio_2$Portfolio_RET,
+     main="Daily Returns Histogram",
+     xlab="Returns",
+     ylab="Frequency",
+     col="blue",
+     breaks = 150
+     )
+
+remove(dsf_portfolio)
+
+```
+
+#8.3 : Volatility Modeling.
+
+```{r}
+
+#Computing daily variance as initial estimate for calculating variance using Risk-Metrics variance model.
+dsf_subset_Vol <- dsf_subset %>%
+                  filter(date_year==1993) %>%
+                  group_by(PERMNO, date_year)%>%
+                  summarise(Vol_estimate = (sum((RET - mean(RET))**2)/251))           
+
+```
+
+#Computing Risk-metrics variance model.
+
+```{r}
+
+compute_variance_func <- function(data){
+
+  output <- data.frame()
+  
+  data <- data %>%
+          mutate(Variance_estimate=1)
+  
+  for (i in 1:length(unique(data$PERMNO))){
+    
+    data_filtered <- data[data$PERMNO==unique(data$PERMNO)[[i]],]
+    
+    for (j in 1:nrow(data_filtered)){
+      
+        if (j==1){
+      
+        data_filtered$Variance_estimate[[j]] <- dsf_subset_Vol[dsf_subset_Vol$PERMNO==data_filtered$PERMNO[[1]],"Vol_estimate"][[1]]
+      
+        }else{
+          
+          data_filtered$Variance_estimate[[j]]  <- (0.94 * data_filtered$Variance_estimate[[j-1]] +  
+                                                    0.06 * (data_filtered$RET[[j]]**2))
+        }
+    }
+    output <- rbind(output, data_filtered)
+  }
+  
+  return (output)
+  
+}
+
+dsf_subset_variance <- compute_variance_func(data = dsf_subset)
+write.csv(dsf_subset_variance, file = "Risk-Metrics_Dynamic_Variance.csv")
+
+```
+
+#Plotting variance estimates for 5 random firms out of the sample of 250 firms.
+
+```{r}
+
+firms_list_sample <- sample(firms_list, 5, replace = FALSE)
+
+print(firms_list_sample)
+
+p1 <- ggplot()+
+  geom_line(data = dsf_subset_variance %>% filter(PERMNO == 11364),aes(x = ymd(DATE), y = Variance_estimate, color="10969")) + 
+  geom_line(data = dsf_subset_variance %>% filter(PERMNO == 10434),aes(x = ymd(DATE), y = Variance_estimate, color="10820")) + 
+  geom_line(data = dsf_subset_variance %>% filter(PERMNO == 11668),aes(x = ymd(DATE), y = Variance_estimate, color="11765")) + 
+  geom_line(data = dsf_subset_variance %>% filter(PERMNO == 10761),aes(x = ymd(DATE), y = Variance_estimate, color="11384")) +
+  geom_line(data = dsf_subset_variance %>% filter(PERMNO == 11405),aes(x = ymd(DATE), y = Variance_estimate, color="12060")) +
+  labs(x="DATE",y="Variance (ratio)",title = "Variance estimates over time")+
+  theme_classic()
+
+print(p1)
+
+```
+
+#8.4: GARCH Modeling.
+
+```{r}
+
+#Preparing data for feeding into regression to estimate GARCH parameters.
+dsf_subset_variance <- dsf_subset_variance %>%
+                       group_by(PERMNO) %>%
+                       mutate(Lagged_variance_estimate = lag(Variance_estimate,1),
+                              Squared_RET = c(RET)**2)
+
+```
+
+#Computing GARCH parameters using rugarch package in R for variance estimation. 
+
+```{r}
+
+GARCH_parameters_func <- function(data){
+  
+  output <- data.frame()
+  
+  for (i in 1:length(unique(data$PERMNO))){
+        
+    data_filtered <- data[data$PERMNO==unique(data$PERMNO)[[i]],]
+    
+    modelx<-ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)), 
+               mean.model = list(armaOrder = c(0, 0), include.mean = TRUE), 
+               distribution.model = "norm",fixed.pars = list(mu=0))
+    
+    setstart(modelx) <- list(omega=0.0, alpha1=0.06, beta1=0.94)
+    fitx <- ugarchfit(data = data_filtered$RET,spec = modelx, method="BFGS")
+    
+    data_filtered <- data_filtered %>%
+                     mutate(omega = coef(fitx)[[2]],
+                            alpha = coef(fitx)[[3]],
+                            beta  = coef(fitx)[[4]])
+
+    output <- rbind(output, data_filtered)
+      
+  }
+
+  return(output)
+}
+
+dsf_GARCH_parameters <- GARCH_parameters_func(data = dsf_subset_variance)
+
+```
+
+#Computing GARCH estimate of variance using these parameters.
+
+```{r}
+
+compute_GARCH_variance_func <- function(data){
+
+  output <- data.frame()
+  
+  data <- data %>%
+          mutate(GARCH_Variance_estimate=1)
+  
+  for (i in 1:length(unique(data$PERMNO))){
+    
+    data_filtered <- data[data$PERMNO==unique(data$PERMNO)[[i]],]
+    
+    for (j in 1:nrow(data_filtered)){
+      
+        if (j==1){
+      
+        data_filtered$GARCH_Variance_estimate[[j]] <- dsf_subset_Vol[dsf_subset_Vol$PERMNO==data_filtered$PERMNO[[1]],"Vol_estimate"][[1]]
+      
+        }else{
+          
+          data_filtered$GARCH_Variance_estimate[[j]] <- (data_filtered$omega[[j]] + 
+                                                         data_filtered$beta[[j]] * data_filtered$GARCH_Variance_estimate[[j-1]] +  
+                                                         data_filtered$alpha[[j]] * (data_filtered$RET[[j]]**2))
+        }
+    }
+    output <- rbind(output, data_filtered)
+  }
+  
+  return (output)
+  
+}
+
+dsf_GARCH_parameters <- compute_GARCH_variance_func(data = dsf_GARCH_parameters)
+write.csv(dsf_GARCH_parameters, file = "GARCH_Variance.csv")
+```
+
+#Plotting for comparison of the 2 models' variance estimates.
+
+```{r}
+
+for (i in 1:length(firms_list_sample)){
+  
+  p1 <- ggplot()+
+  geom_line(data = dsf_subset_variance %>% filter(PERMNO == firms_list_sample[[i]]), aes(x = DATE, y = Variance_estimate, color = "Risk-Metrics Dynamic variance Model")) + 
+  geom_line(data = dsf_GARCH_parameters %>% filter(PERMNO == firms_list_sample[[i]]), aes(x = DATE, y = GARCH_Variance_estimate, color = "GARCH Dynamic Variance Model")) +
+  labs(x = "DATE", y ="Variance (ratio)", title = str_glue("Variance estimates over time for Firm: {firms_list_sample[[i]]}"))+
+  theme_classic()
+                                        
+  print(p1)                
+  
+}
+
+```
+
